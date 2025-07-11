@@ -3,7 +3,6 @@
 #include <string.h>
 
 // --- Definições Privadas do Módulo ---
-// Variável renomeada para evitar conflito
 const uint8_t BMP280_SENSOR_ADDR = 0x76;
 const uint8_t REG_CALIB_DATA = 0x88;
 const uint8_t REG_CTRL_MEAS = 0xF4;
