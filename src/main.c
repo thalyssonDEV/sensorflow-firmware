@@ -11,21 +11,14 @@
 #include "lwip/ip_addr.h"
 #include "lwip/tcp.h"
 
-// --- CONFIGURAÇÕES DA REDE E API ---
-// #define WIFI_SSID         "teste"
-// #define WIFI_PASSWORD     "teste123"
-// #define TARGET_SERVER_IP  "34.95.183.220"
-// #define TARGET_PORT       80
-// #define TARGET_PATH       "/api/temperature_reading"
-// #define API_KEY           "to10c0rr5OVzx6nvaiBT4bMA5mUREPTVamSkOy41D00vzFyXTuX1mdv2RIA3tjLJCeoUueyEZDvRPKSSg4NTEpaZftRBY0vhSF9czgUVR2xziw6rT4o2Of8Q8bYh7BYx"
-#define SEND_INTERVAL_MS  5000
+#define SEND_INTERVAL_MS 5000
 
 // --- ESTRUTURA PARA GERIR O ESTADO DA CONEXÃO ---
 typedef struct TCP_CLIENT_T_ {
     struct tcp_pcb *pcb;
     ip_addr_t remote_addr;
     bool complete;
-    char http_response[2048];
+    char http_response[1024];
     float temperature;
     float humidity;
     float pressure;
@@ -34,10 +27,9 @@ typedef struct TCP_CLIENT_T_ {
 
 
 // --- CALLBACKS DA PILHA TCP/IP ---
-
 static err_t tcp_client_close(void *arg) {
     TCP_CLIENT_T *state = (TCP_CLIENT_T *)arg;
-    state->complete = true;
+    state->complete = true; // Sinaliza para o loop de espera terminar
     if (state->pcb != NULL) {
         tcp_arg(state->pcb, NULL);
         tcp_poll(state->pcb, NULL, 0);
@@ -63,7 +55,8 @@ static err_t callback_response_received(void *arg, struct tcp_pcb *pcb, struct p
         tcp_recved(pcb, p->tot_len);
     }
     pbuf_free(p);
-    return ERR_OK;
+    
+    return tcp_client_close(state);
 }
 
 static err_t callback_connected(void *arg, struct tcp_pcb *pcb, err_t err) {
@@ -95,36 +88,31 @@ static err_t callback_connected(void *arg, struct tcp_pcb *pcb, err_t err) {
              TARGET_PATH, TARGET_SERVER_IP, API_KEY, (int)strlen(json_body), json_body);
     
     printf("[INFO] Enviando requisicao POST...\n");
+    cyw43_arch_lwip_begin();
     err_t write_err = tcp_write(pcb, request, strlen(request), TCP_WRITE_FLAG_COPY);
-    if (write_err != ERR_OK) {
-        printf("[ERRO] Falha ao enviar dados TCP: %d\n", write_err);
-        return tcp_client_close(state);
-    }
-    
-    err_t output_err = tcp_output(pcb);
-    if (output_err == ERR_OK) {
+    if (write_err == ERR_OK) {
+        tcp_output(pcb);
         printf("[OK]   Requisicao enviada. Aguardando resposta.\n");
     } else {
-        printf("[ERRO] Falha ao executar tcp_output: %d\n", output_err);
+        printf("[ERRO] Falha ao enviar dados TCP: %d\n", write_err);
+        cyw43_arch_lwip_end();
         return tcp_client_close(state);
     }
+    cyw43_arch_lwip_end();
     return ERR_OK;
 }
 
-
-// --- FUNÇÕES PRINCIPAIS ---
-
 void send_data_to_cloud(float temp, float hum, float pres, const char* board_id) {
     printf("\n****************************************************\n");
-    printf("* INICIANDO CICLO DE ENVIO             *\n");
+    printf("* INICIANDO CICLO DE ENVIO                     *\n");
     printf("****************************************************\n");
     
+    // 1. Aloca memória para o estado da conexão
     TCP_CLIENT_T *state = (TCP_CLIENT_T*)calloc(1, sizeof(TCP_CLIENT_T));
     if (!state) {
         printf("[ERRO] Falha ao alocar memoria para o estado.\n");
         return;
     }
-    // Copia os dados para a estrutura de estado
     state->temperature = temp;
     state->humidity = hum;
     state->pressure = pres;
@@ -136,7 +124,7 @@ void send_data_to_cloud(float temp, float hum, float pres, const char* board_id)
     state->pcb = tcp_new_ip_type(IP_GET_TYPE(&state->remote_addr));
     if (!state->pcb) {
         printf("[ERRO] Falha ao criar o PCB.\n");
-        free(state);
+        free(state); // Liberta a memória se a criação do PCB falhar
         return;
     }
 
@@ -148,25 +136,26 @@ void send_data_to_cloud(float temp, float hum, float pres, const char* board_id)
 
     if (error != ERR_OK) {
         printf("[ERRO] Falha ao iniciar conexao TCP: %d\n", error);
-        tcp_client_close(state); // Liberta a memória
+        // A função tcp_client_close não será chamada, então libertamos a memória aqui
+        free(state);
         return;
     }
 
-    // --- LOOP DE ESPERA SÍNCRONO ---
-    // Aguarda aqui até que o callback feche a conexão e marque como 'complete'
+    // Loop de espera síncrono
     int timeout_s = 20;
     while (!state->complete && timeout_s-- > 0) {
         cyw43_arch_poll();
         sleep_ms(1000);
     }
 
+    // 2. Liberta a memória no final do ciclo, independentemente do resultado
     if (!state->complete) {
         printf("[ERRO] Timeout no ciclo de envio!\n");
-        // Força o fecho e a libertação de memória em caso de timeout
-        tcp_client_close(state);
-    } else {
-        printf("[INFO] Ciclo de envio concluido.\n");
+        tcp_abort(state->pcb); // Aborta a conexão em caso de timeout
     }
+    
+    printf("[INFO] Ciclo de envio concluido. A libertar memoria.\n");
+    free(state); // A correção principal está aqui!
 }
 
 int wifi_init() {
